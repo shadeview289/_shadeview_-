@@ -1,4 +1,6 @@
 Flask
+Flask-SQLAlchemy # If you are using this for your ORM
+psycopg2-binary  # The Python driver for PostgreSQL
 werkzeug
 fpdf
 opencv-python

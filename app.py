@@ -1,5 +1,5 @@
 import os
-import sqlite3  # Still imported but will not be actively used for new data handling
+import sqlite3  # Still imported, can be removed if SQLite is no longer a fallback
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, send_from_directory
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -7,17 +7,14 @@ from fpdf import FPDF
 from datetime import datetime
 import cv2  # For image processing
 import numpy as np  # For numerical operations with images
-import json  # For parsing Firebase config
+import json  # For parsing Firebase config and storing JSON data
 import traceback # Import for printing full tracebacks
 import uuid # For generating unique filenames
 
-# --- Firestore Imports ---
-# These are conceptual imports for a standard Python environment.
-# In the Canvas environment, Firebase interaction happens via fetch to API.
-# However, we keep the imports for conceptual structure for a real Python Flask app.
-# For this Canvas, we will simulate the Firestore calls.
-# from firebase_admin import credentials, firestore, initialize_app
-# from google.cloud.firestore import Client as FirestoreClient # For type hinting if using client library
+# --- NEW IMPORTS FOR POSTGRESQL & FLASK-SQLALCHEMY ---
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+# --- END NEW IMPORTS ---
 
 # --- NEW IMPORTS FOR AI (Machine Learning) INTEGRATION ---
 from sklearn.neighbors import KNeighborsClassifier
@@ -99,12 +96,31 @@ os.makedirs(REPORT_FOLDER, exist_ok=True)
 # Configure Flask app with folder paths
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['REPORT_FOLDER'] = REPORT_FOLDER
-# app.config['DATABASE'] = os.path.join(app.root_path, 'database.db') # SQLite DB path (no longer primary)
 
-# --- Firestore (Simulated for Canvas) ---
-# In a real Flask app, you'd use Firebase Admin SDK or Google Cloud client library.
-# Here, we'll use placeholder functions that simulate Firestore behavior
-# using the Canvas provided globals.
+# --- NEW DATABASE CONFIGURATION FOR POSTGRESQL (using Flask-SQLAlchemy) ---
+# Get the PostgreSQL database URL from the environment variable 'DATABASE_URL'.
+# For local development (when DATABASE_URL is not set), it will fall back to SQLite.
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    'DATABASE_URL',
+    'sqlite:///database.db' # This is your local SQLite file for development
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False # Recommended to suppress warnings
+
+# Initialize your database instance for Flask-SQLAlchemy
+db = SQLAlchemy(app)
+
+# Initialize Flask-Migrate (crucial for creating and updating tables in Postgres)
+migrate = Migrate(app, db)
+# --- END NEW DATABASE CONFIGURATION ---
+
+
+# --- Firestore (Simulated for Canvas) - Retained from your original code ---
+# These are conceptual imports for a standard Python environment.
+# In the Canvas environment, Firebase interaction happens via fetch to API.
+# However, we keep the imports for conceptual structure for a real Python Flask app.
+# For this Canvas, we will simulate the Firestore calls.
+# from firebase_admin import credentials, firestore, initialize_app
+# from google.cloud.firestore import Client as FirestoreClient # For type hinting if using client library
 
 # __app_id and __firebase_config are provided by the Canvas environment.
 app_id = os.environ.get('__app_id', 'default-app-id')  # Fallback for local testing
@@ -121,20 +137,17 @@ db_data = {
         }
     }
 }
-# 'db' will now just be a reference to this global dict for functions.
-db = db_data # db is now a reference to the global simulated data structure
+# IMPORTANT: 'db' in your original code pointed to 'db_data'. Now 'db' points to SQLAlchemy.
+# Ensure your Firestore simulation functions use 'db_data' directly, not 'db'.
+# This avoids conflict with SQLAlchemy's 'db' object.
+
 
 # --- Firestore Initialization Logic (moved to a function not directly called by app_context) ---
-# This function is now mainly for conceptual understanding or if you have specific
-# setup logic that needs to run only once *outside* the request lifecycle but *after* app init.
-# For user session management, `before_request` is better.
 def setup_initial_firebase_globals():
     """
     Sets up conceptual global data for Firestore simulation if needed.
     This runs once at app startup.
     """
-    # This function mostly ensures app_id and firebase_config are processed.
-    # User-specific G objects are handled in before_request.
     print(f"DEBUG: App ID: {app_id}")
     print(f"DEBUG: Firebase Config (partial): {list(firebase_config.keys())[:3]}...")
 
@@ -143,10 +156,65 @@ setup_initial_firebase_globals()
 
 
 # ===============================================
-# 2. DATABASE INITIALIZATION & HELPERS (Firestore)
+# 2. DATABASE MODELS (for PostgreSQL with Flask-SQLAlchemy)
 # ===============================================
 
-# These functions now work with the simulated Firestore 'db_data' global
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Define relationship to PatientRecord
+    # 'backref' allows you to access associated PatientRecords from a User object: user.patient_records
+    patient_records = db.relationship('PatientRecord', backref='user', lazy=True)
+
+    def __repr__(self):
+        return f'<User {self.username}>'
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+class PatientRecord(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    patient_name = db.Column(db.String(100), nullable=False)
+    record_date = db.Column(db.DateTime, default=datetime.utcnow)
+    uploaded_image_path = db.Column(db.String(255))
+    analysis_results_json = db.Column(db.Text) # To store JSON string of the analysis results
+
+    # Add specific fields for shades if you want them as separate columns in DB
+    incisal_shade = db.Column(db.String(20))
+    middle_shade = db.Column(db.String(20))
+    cervical_shade = db.Column(db.String(20))
+    overall_ml_shade = db.Column(db.String(20))
+    # You can add more fields based on the 'detected_shades' dictionary
+    # For example:
+    # simulated_overall_shade = db.Column(db.String(50))
+    # tooth_condition = db.Column(db.String(100))
+    # stain_presence = db.Column(db.String(100))
+    # decay_presence = db.Column(db.String(100))
+    # suggested_aesthetic_shade = db.Column(db.String(50))
+    # aesthetic_confidence = db.Column(db.String(20))
+    # recommendation_notes = db.Column(db.Text)
+
+    def __repr__(self):
+        return f'<PatientRecord {self.patient_name} by User {self.user_id}>'
+
+# ===============================================
+# END DATABASE MODELS
+# ===============================================
+
+
+# ===============================================
+# 3. DATABASE INITIALIZATION & HELPERS (Firestore Simulation - Unchanged)
+# ===============================================
+
+# These functions still work with the simulated Firestore 'db_data' global
 
 def get_firestore_collection(path_segments):
     """Navigates the simulated Firestore structure to get a collection."""
@@ -204,42 +272,64 @@ def get_firestore_documents_in_collection(path_segments, query_filters=None):
     return results
 
 
-# No close_db for Firestore, as it's typically managed differently than SQLite.
-# The db_data structure is persistent for the Flask app lifecycle.
-
-# No init_db for SQLite needed, as Firestore is primary.
-# The user/patient tables will now be collections in Firestore.
-
 # ===============================================
-# 3. AUTHENTICATION HELPERS (Adapted for Firestore)
+# 4. AUTHENTICATION HELPERS (UPDATED for Flask-SQLAlchemy)
 # ===============================================
 
 @app.before_request
 def load_logged_in_user():
-    """Loads the logged-in user into Flask's `g` object for the current request.
-    Uses session for persistence across requests.
     """
-    # If user_id is not in session, it's either a new session or the first request
-    # Set up an anonymous user by default.
-    if 'user_id' not in session:
-        # In a Canvas environment, check for initial_auth_token.
-        # Otherwise, assign a new anonymous ID.
+    Loads the logged-in user into Flask's `g` object for the current request.
+    Uses session for persistence across requests.
+    Attempts to load user from PostgreSQL.
+    """
+    user_id = session.get('user_id')
+
+    if user_id is None:
+        g.user = None
+        g.user_id = None
+        g.firestore_user_id = None # Keep this for your simulated Firestore logic
+    else:
+        try:
+            # Query user from PostgreSQL by ID using SQLAlchemy
+            user = User.query.get(user_id) # Use .get() for primary key
+            if user:
+                g.user = {'id': user.id, 'username': user.username}
+                g.user_id = user.id
+                g.firestore_user_id = g.user_id # Maintain consistency for Firestore sim
+            else:
+                # User not found in DB (e.g., deleted or session stale)
+                session.clear()
+                g.user = None
+                g.user_id = None
+                g.firestore_user_id = None
+                print(f"DEBUG: User with ID {user_id} not found in DB. Clearing session.")
+        except Exception as e:
+            # Handle potential database connection errors during before_request
+            print(f"ERROR: Database error in load_logged_in_user: {e}")
+            traceback.print_exc() # Print full traceback for debugging
+            session.clear() # Clear session to prevent infinite loop on error
+            g.user = None
+            g.user_id = None
+            g.firestore_user_id = None
+
+    # Handle initial_auth_token for Canvas environment if no DB user is set
+    # Or fallback to an anonymous ID if no token and no real user
+    if g.user_id is None:
         initial_auth_token = os.environ.get('__initial_auth_token')
         if initial_auth_token:
-            session['user_id'] = initial_auth_token.split(':')[-1]
-            session['user'] = {'id': session['user_id'], 'username': f"User_{session['user_id'][:8]}"}
-            print(f"DEBUG: Initializing session user from token: {session['user']['username']}")
+            # This token might be a generic canvas user ID, not a DB user ID
+            simulated_id = initial_auth_token.split(':')[-1]
+            g.user_id = simulated_id
+            g.user = {'id': simulated_id, 'username': f"CanvasUser_{simulated_id[:8]}"}
+            g.firestore_user_id = g.user_id # Use this for Firestore pathing
+            print(f"DEBUG: Setting g.user from initial_auth_token: {g.user['username']}")
         else:
-            session['user_id'] = 'anonymous-' + str(np.random.randint(100000, 999999))
-            session['user'] = {'id': session['user_id'], 'username': f"AnonUser_{session['user_id'][-6:]}"}
-            print(f"DEBUG: Initializing session user to anonymous: {session['user']['username']}")
-
-    # Always assign from session to g for the current request
-    g.user_id = session.get('user_id')
-    g.user = session.get('user')
-
-    # Ensure firestore_user_id is always available for Firestore pathing
-    g.firestore_user_id = g.user_id # No need for a fallback here, as g.user_id is now guaranteed.
+            # Fallback to anonymous if no token and no real user
+            g.user_id = 'anonymous-' + str(np.random.randint(100000, 999999))
+            g.user = {'id': g.user_id, 'username': f"AnonUser_{g.user_id[-6:]}"}
+            g.firestore_user_id = g.user_id
+            print(f"DEBUG: Setting g.user to anonymous: {g.user['username']}")
 
     # print(f"DEBUG: Request user loaded: {g.user['username']} (FS ID: {g.firestore_user_id})")
 
@@ -251,8 +341,7 @@ def login_required(view):
     @functools.wraps(view)
     def wrapped_view(**kwargs):
         # Check if the user is truly "logged in" (not the default anonymous user)
-        # You might adjust this based on how real login works in the Canvas.
-        if g.user is None or 'anonymous' in g.user_id: # Check if user is anonymous
+        if g.user is None or 'anonymous' in str(g.user_id): # Check if user is anonymous or g.user_id is not set
             flash('Please log in to access this page.', 'warning')
             return redirect(url_for('login'))
         return view(**kwargs)
@@ -261,7 +350,7 @@ def login_required(view):
 
 
 # ===============================================
-# 4. CORE HELPER FUNCTIONS (Image Correction, Shade Detection, PDF Generation, Enhanced Simulated AI)
+# 5. CORE HELPER FUNCTIONS (Image Correction, Shade Detection, PDF Generation, Enhanced Simulated AI)
 # ===============================================
 
 # Function to map L-value to a VITA shade based on adjusted rules
@@ -435,7 +524,7 @@ def detect_face_features(image_np_array):
         "skin_tone": simulated_skin_tone,
         "lip_color": simulated_lip_color,
         "eye_contrast": eye_contrast_sim,
-        "facial_harmony_score": round(np.random.uniform(0.7, 0.95), 2),  # FIX: Use round() for float
+        "facial_harmony_score": round(np.random.uniform(0.7, 0.95), 2),
         # "notes": "Simulated analysis. Actual facial feature detection requires specialized deep learning models." # REMOVED
     }
 
@@ -661,8 +750,6 @@ def detect_shades_from_image(image_path):
         print(f"DEBUG: Corrected image dimensions: Height={height}, Width={width}")
 
         # Ensure image has enough height for slicing
-        # A common image height for a tooth could be hundreds of pixels.
-        # If the image is tiny (e.g., less than 30 pixels high), slicing might result in empty arrays.
         min_height_for_slicing = 30 # Adjust based on expected smallest tooth image size
         if height < min_height_for_slicing:
             print(f"ERROR: Image height ({height} pixels) is too small for zonal slicing. Minimum required: {min_height_for_slicing} pixels. Cannot perform detailed shade detection.")
@@ -697,392 +784,337 @@ def detect_shades_from_image(image_path):
         print(f"DEBUG: Average L values (0-255 scale): Incisal={avg_incisal_l_255:.2f}, Middle={avg_middle_l_255:.2f}, Cervical={avg_cervical_l_255:.2f}")
 
         # Normalize L values to 0-100 scale for ML prediction and rule-based mapping consistency
-        # Assuming the training data's L values were in 0-100 scale.
         avg_incisal_l_100 = avg_incisal_l_255 / 2.55
         avg_middle_l_100 = avg_middle_l_255 / 2.55
         avg_cervical_l_100 = avg_cervical_l_255 / 2.55
         print(f"DEBUG: Average L values (0-100 scale): Incisal={avg_incisal_l_100:.2f}, Middle={avg_middle_l_100:.2f}, Cervical={avg_cervical_l_100:.2f}")
 
+        # Use rule-based mapping for individual zones for UI consistency
+        incisal_shade_rule = map_l_to_shade_rule_based(avg_incisal_l_100)
+        middle_shade_rule = map_l_to_shade_rule_based(avg_middle_l_100)
+        cervical_shade_rule = map_l_to_shade_rule_based(avg_cervical_l_100)
+        print("DEBUG: Rule-based shades determined for zones.")
 
-        if shade_classifier_model is not None:
-            # Use 0-100 scaled L values for ML prediction
-            features_for_ml_prediction = np.array([[avg_incisal_l_100, avg_middle_l_100, avg_cervical_l_100]])
-            overall_ml_shade = shade_classifier_model.predict(features_for_ml_prediction)[0]
+        overall_ml_shade = "Model Not Loaded or Error"
+        if shade_classifier_model:
+            try:
+                # Predict overall shade using the loaded ML model
+                # The model expects L values in the 0-100 scale, matching our normalization
+                input_features = np.array([[avg_incisal_l_100, avg_middle_l_100, avg_cervical_l_100]])
+                overall_ml_shade = shade_classifier_model.predict(input_features)[0]
+                print(f"DEBUG: ML model predicted overall shade: {overall_ml_shade}")
+            except Exception as e:
+                print(f"ERROR: ML model prediction failed: {e}")
+                traceback.print_exc()
+                overall_ml_shade = "ML Prediction Error"
         else:
-            overall_ml_shade = "Model Error"
-            print("WARNING: AI model not loaded/trained. Cannot provide ML shade prediction.")
+            print("WARNING: Shade classifier model is not available. ML prediction skipped.")
 
-        detected_shades = {
-            "incisal": map_l_to_shade_rule_based(avg_incisal_l_100), # Use 0-100 scaled for rule-based
-            "middle": map_l_to_shade_rule_based(avg_middle_l_100),   # Use 0-100 scaled for rule-based
-            "cervical": map_l_to_shade_rule_based(avg_cervical_l_100), # Use 0-100 scaled for rule-based
+        return {
+            "incisal": incisal_shade_rule,
+            "middle": middle_shade_rule,
+            "cervical": cervical_shade_rule,
             "overall_ml_shade": overall_ml_shade,
             "face_features": face_features,
             "tooth_analysis": tooth_analysis,
             "aesthetic_suggestion": aesthetic_suggestion
         }
 
-        print(f"DEBUG: Features for ML: {features_for_ml_prediction}")
-        print(f"DEBUG: Predicted Overall Shade (ML): {overall_ml_shade}")
-        print(f"DEBUG: Detected Shades Per Zone (Rule-based): {detected_shades}")
-        return detected_shades
-
     except Exception as e:
-        print(f"CRITICAL ERROR during shade detection: {e}") # Make this stand out
-        traceback.print_exc() # This will print the full traceback to the console
+        print(f"ERROR: An unexpected error occurred during shade detection: {e}")
+        traceback.print_exc() # Print full traceback for debugging
         return {
             "incisal": "Error", "middle": "Error", "cervical": "Error",
-            "overall_ml_shade": "Error",
+            "overall_ml_shade": "Error - See Logs",
             "face_features": {}, "tooth_analysis": {}, "aesthetic_suggestion": {}
         }
 
 
-def generate_pdf_report(patient_name, shades, image_path, filepath):
-    """Generates a PDF report with detected shades and the uploaded image."""
+def generate_pdf_report(patient_name, shades, image_filename, report_filename, analysis_date):
+    """
+    Generates a detailed PDF report for the shade analysis.
+    Now includes enhanced AI insights.
+    """
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=16)
-
-    pdf.cell(200, 10, txt="Shade View - Tooth Shade Analysis Report", ln=True, align='C')
-    pdf.ln(10)
-
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, txt=f"Patient Name: {patient_name}", ln=True)
-    pdf.cell(0, 10, txt=f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+
+    pdf.cell(200, 10, txt="ShadeView Dental Analysis Report", ln=True, align="C")
+    pdf.ln(5) # Add some space
+
+    pdf.set_font("Arial", 'B', 10)
+    pdf.cell(0, 10, f"Patient Name: {patient_name}", ln=True)
+    pdf.cell(0, 10, f"Analysis Date: {analysis_date}", ln=True)
     pdf.ln(5)
 
-    pdf.set_font("Arial", 'B', size=14)
-    pdf.cell(0, 10, txt="Detected Shades:", ln=True)
-    pdf.set_font("Arial", size=12)
-    if "overall_ml_shade" in shades and shades["overall_ml_shade"] != "N/A":
-        pdf.cell(0, 7, txt=f"   - Overall AI Prediction : {shades['overall_ml_shade']}", ln=True)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "Tooth Shade Analysis", ln=True)
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 7, f"Incisal Zone: {shades.get('incisal', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Middle Zone: {shades.get('middle', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Cervical Zone: {shades.get('cervical', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Overall ML Shade Recommendation: {shades.get('overall_ml_shade', 'N/A')}", ln=True)
+    pdf.ln(5)
 
-    pdf.cell(0, 7, txt=f"   - Incisal Zone: {shades['incisal']}", ln=True)
-    pdf.cell(0, 7, txt=f"   - Middle Zone: {shades['middle']}", ln=True)
-    pdf.cell(0, 7, txt=f"   - Cervical Zone: {shades['cervical']}", ln=True)
+    # Add image to PDF
+    image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_filename)
+    if os.path.exists(image_path):
+        try:
+            pdf.image(image_path, x=10, y=None, w=pdf.w - 20) # Use full width minus margins
+            pdf.ln(5)
+            pdf.cell(0, 5, "Analyzed Image:", ln=True)
+            pdf.ln(5)
+        except Exception as e:
+            print(f"WARNING: Could not embed image {image_filename} in PDF: {e}")
+            pdf.cell(0, 10, f"Image could not be embedded: {e}", ln=True)
+    else:
+        pdf.cell(0, 10, "Original image not found for embedding in report.", ln=True)
+    pdf.ln(5)
 
-    pdf.ln(8)
-    pdf.set_font("Arial", 'B', size=13)
-    pdf.cell(0, 10, txt="Advanced AI Insights (Simulated):", ln=True)
-    pdf.set_font("Arial", size=11)
+    # --- Add Enhanced AI Insights ---
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "Facial Harmony Analysis (Simulated)", ln=True)
+    pdf.set_font("Arial", size=10)
+    face_features = shades.get('face_features', {})
+    pdf.cell(0, 7, f"Skin Tone: {face_features.get('skin_tone', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Lip Color: {face_features.get('lip_color', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Eye Contrast: {face_features.get('eye_contrast', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Facial Harmony Score: {face_features.get('facial_harmony_score', 'N/A')}", ln=True)
+    pdf.ln(5)
 
-    # Display Simulated Tooth Analysis
-    tooth_analysis = shades.get("tooth_analysis", {})
-    if tooth_analysis:
-        pdf.cell(0, 7, txt="   -- Tooth Analysis --", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Overall Shade (Detailed): {tooth_analysis.get('simulated_overall_shade', 'N/A')}",
-                 ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Condition: {tooth_analysis.get('tooth_condition', 'N/A')}", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Stain Presence: {tooth_analysis.get('stain_presence', 'N/A')}", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Decay Presence: {tooth_analysis.get('decay_presence', 'N/A')}", ln=True)
-        # Ensure values exist before formatting
-        l_val = tooth_analysis.get('overall_lab', {}).get('L', 'N/A')
-        a_val = tooth_analysis.get('overall_lab', {}).get('a', 'N/A')
-        b_val = tooth_analysis.get('overall_lab', {}).get('b', 'N/A')
-        if all(isinstance(v, (int, float)) for v in [l_val, a_val, b_val]):
-            pdf.cell(0, 7, txt=f"   - Simulated Overall LAB: L={l_val:.2f}, a={a_val:.2f}, b={b_val:.2f}", ln=True)
-        else:
-            pdf.cell(0, 7, txt=f"   - Simulated Overall LAB: L={l_val}, a={a_val}, b={b_val}", ln=True)
-        # Removed the specific note as per user request
-        # if tooth_analysis.get('notes'):
-        #     pdf.multi_cell(0, 7, txt=f"   - Notes: {tooth_analysis.get('notes')}")
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "Detailed Tooth Analysis (Simulated)", ln=True)
+    pdf.set_font("Arial", size=10)
+    tooth_analysis = shades.get('tooth_analysis', {})
+    pdf.cell(0, 7, f"Overall LAB (L, a, b): {tooth_analysis.get('overall_lab', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Simulated Overall Shade: {tooth_analysis.get('simulated_overall_shade', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Tooth Condition: {tooth_analysis.get('tooth_condition', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Stain Presence: {tooth_analysis.get('stain_presence', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Decay Presence: {tooth_analysis.get('decay_presence', 'N/A')}", ln=True)
+    pdf.ln(5)
 
-    pdf.ln(3)
-    # Display Simulated Facial Features (including new skin/lip tone)
-    face_features = shades.get("face_features", {})
-    if face_features:
-        pdf.cell(0, 7, txt="   -- Facial Aesthetics Analysis --", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Skin Tone: {face_features.get('skin_tone', 'N/A')}", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Lip Color: {face_features.get('lip_color', 'N/A')}", ln=True)
-        pdf.cell(0, 7, txt=f"   - Simulated Eye Contrast: {face_features.get('eye_contrast', 'N/A')}", ln=True)
-        harmony_score = face_features.get('facial_harmony_score', 'N/A')
-        if isinstance(harmony_score, (int, float)):
-            pdf.cell(0, 7, txt=f"   - Simulated Facial Harmony Score: {harmony_score:.2f}", ln=True)
-        else:
-            pdf.cell(0, 7, txt=f"   - Simulated Facial Harmony Score: {harmony_score}", ln=True)
-        # Removed the specific note as per user request
-        # if face_features.get('notes'):
-        #     pdf.multi_cell(0, 7, txt=f"   - Notes: {face_features.get('notes')}")
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "Aesthetic Shade Suggestion (Simulated)", ln=True)
+    pdf.set_font("Arial", size=10)
+    aesthetic_suggestion = shades.get('aesthetic_suggestion', {})
+    pdf.cell(0, 7, f"Suggested Shade: {aesthetic_suggestion.get('suggested_aesthetic_shade', 'N/A')}", ln=True)
+    pdf.cell(0, 7, f"Confidence: {aesthetic_suggestion.get('aesthetic_confidence', 'N/A')}", ln=True)
+    # Use multi_cell for longer notes
+    pdf.multi_cell(0, 7, f"Recommendation Notes: {aesthetic_suggestion.get('recommendation_notes', 'N/A')}")
+    pdf.ln(5)
+    # --- End Enhanced AI Insights ---
 
-    pdf.ln(3)
-    # Display Simulated Aesthetic Suggestion
-    aesthetic_suggestion = shades.get("aesthetic_suggestion", {})
-    if aesthetic_suggestion:
-        pdf.cell(0, 7, txt="   -- Aesthetic Shade Suggestion --", ln=True)
-        pdf.cell(0, 7, txt=f"   - Suggested Shade: {aesthetic_suggestion.get('suggested_aesthetic_shade', 'N/A')}",
-                 ln=True)
-        pdf.cell(0, 7, txt=f"   - Confidence: {aesthetic_suggestion.get('aesthetic_confidence', 'N/A')}", ln=True)
-        pdf.multi_cell(0, 7, txt=f"   - Notes: {aesthetic_suggestion.get('recommendation_notes', 'N/A')}")
 
-    pdf.ln(10)
-
-    try:
-        if os.path.exists(image_path):
-            pdf.cell(0, 10, txt="Uploaded Image:", ln=True)
-            if pdf.get_y() > 200:
-                pdf.add_page()
-            img_cv = cv2.imread(image_path)
-            if img_cv is not None:
-                h_img, w_img, _ = img_cv.shape
-                max_w_pdf = 180
-                w_pdf = min(w_img, max_w_pdf)
-                h_pdf = h_img * (w_pdf / w_img)
-
-                if pdf.get_y() + h_pdf + 10 > pdf.h - pdf.b_margin:
-                    pdf.add_page()
-
-                pdf.image(image_path, x=pdf.get_x(), y=pdf.get_y(), w=w_pdf, h=h_pdf)
-                pdf.ln(h_pdf + 10)
-            else:
-                pdf.cell(0, 10, txt="Note: Image could not be loaded for embedding.", ln=True)
-
-        else:
-            pdf.cell(0, 10, txt="Note: Uploaded image file not found for embedding.", ln=True)
-    except Exception as e:
-        print(f"Error adding image to PDF: {e}")
-        pdf.cell(0, 10, txt="Note: An error occurred while embedding the image in the report.", ln=True)
-
-    pdf.set_font("Arial", 'I', size=9)  # Disclaimer in italics
-    pdf.multi_cell(0, 6,
-                   txt="DISCLAIMER: This report is based on simulated AI analysis for demonstration purposes only. It is not intended for clinical diagnosis, medical advice, or professional cosmetic planning. Always consult with a qualified dental or medical professional for definitive assessment, diagnosis, and treatment.",
-                   align='C')
-    pdf.output(filepath)
+    output_path = os.path.join(app.config['REPORT_FOLDER'], report_filename)
+    pdf.output(output_path)
+    return output_path
 
 
 # ===============================================
-# 5. ROUTES (Adapted for Firestore)
+# 6. FLASK ROUTES (UPDATED for Flask-SQLAlchemy)
 # ===============================================
+
 @app.route('/')
-def home():
-    """Renders the home/landing page."""
-    return render_template('index.html')
+def index():
+    if g.user and 'anonymous' not in str(g.user_id):
+        return render_template('dashboard.html', user=g.user)
+    return redirect(url_for('login'))
 
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    """Handles user login (Simulated for Canvas)."""
-    # If user is already "logged in" (i.e., not anonymous), redirect
-    if g.user and 'anonymous' not in g.user['id']:
-        flash(f"You are already logged in as {g.user['username']}.", 'info')
-        return redirect(url_for('dashboard'))
-
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']  # In a real app, hash and check this
-        error = None
-
-        if not username or not password:
-            error = 'Username and password are required.'
-
-        if error is None:
-            # Simulate user lookup/creation and set session
-            simulated_user_id = 'user_' + username.lower().replace(' ', '_')
-            session['user_id'] = simulated_user_id
-            session['user'] = {'id': simulated_user_id, 'username': username}
-            flash(f'Simulated login successful for {username}!', 'success')
-            print(f"DEBUG: Simulated login for user: {username} (ID: {session['user_id']})")
-            return redirect(url_for('dashboard'))
-        flash(error, 'danger')
-
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
+@app.route('/register', methods=('GET', 'POST'))
 def register():
-    """Handles user registration (Simulated for Canvas)."""
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
+        email = request.form['email']
         error = None
 
         if not username:
             error = 'Username is required.'
         elif not password:
             error = 'Password is required.'
+        elif not email:
+            error = 'Email is required.'
 
         if error is None:
-            # Simulate user creation - no actual user database interaction here
-            # In a real app, you'd add user to Firebase Auth/Firestore
-            flash(f"Simulated registration successful for {username}. You can now log in!", 'success')
-            return redirect(url_for('login'))
-        flash(error, 'danger')
+            # Check if username or email already exists in PostgreSQL
+            existing_user = User.query.filter_by(username=username).first()
+            existing_email = User.query.filter_by(email=email).first()
 
+            if existing_user:
+                error = f"User {username} is already registered."
+            elif existing_email:
+                error = f"Email {email} is already registered."
+            else:
+                # Create new user and add to PostgreSQL
+                new_user = User(username=username, email=email)
+                new_user.set_password(password) # This hashes the password
+                db.session.add(new_user)
+                db.session.commit() # Save the new user to the database
+                flash('Registration successful!', 'success')
+                return redirect(url_for('login'))
+        flash(error, 'danger')
     return render_template('register.html')
 
 
+@app.route('/login', methods=('GET', 'POST'))
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        error = None
+
+        # Query user from PostgreSQL
+        user = User.query.filter_by(username=username).first()
+
+        if user is None:
+            error = 'Incorrect username.'
+        elif not user.check_password(password): # Checks hashed password
+            error = 'Incorrect password.'
+
+        if error is None:
+            session.clear()
+            session['user_id'] = user.id # Store user ID in session
+            session['user'] = {'id': user.id, 'username': user.username} # Store user dict for g.user
+            flash('You were successfully logged in!', 'success')
+            return redirect(url_for('index')) # Or your main dashboard route
+        flash(error, 'danger')
+    return render_template('login.html')
+
+
 @app.route('/logout')
-def logout(): # login_required decorator removed as we are directly modifying session here
-    """Handles user logout."""
-    # Clear session and reset to an anonymous user
-    session.clear() # Clears all session data
-    # The next before_request will re-initialize g.user_id and g.user to an anonymous one.
+def logout():
+    session.clear() # Clear the entire session
     flash('You have been logged out.', 'info')
-    print(f"DEBUG: User logged out. Session cleared.")
-    return redirect(url_for('home'))
+    return redirect(url_for('login'))
+
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    """Renders the user dashboard, displaying past reports."""
-    # Fetch reports specific to the current user (simulated)
-    # Path: artifacts/{app_id}/users/{user_id}/reports
-    reports_path = ['artifacts', app_id, 'users', g.firestore_user_id, 'reports']
-    user_reports = get_firestore_documents_in_collection(reports_path)
-    # Sort by date in descending order, if available
-    user_reports.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-
-    # Pass the current date formatted for the HTML date input
-    current_date_formatted = datetime.now().strftime('%Y-%m-%d')
-
-    return render_template('dashboard.html',
-                           reports=user_reports,
-                           user=g.user,
-                           current_date=current_date_formatted) # Pass current_date here
-
-
-@app.route('/save_patient_data', methods=['POST'])
-@login_required
-def save_patient_data():
-    """Handles saving new patient records to Firestore and redirects to image upload page."""
-    op_number = request.form['op_number']
-    patient_name = request.form['patient_name']
-    age = request.form['age']
-    sex = request.form['sex']
-    record_date = request.form['date']
-    user_id = g.user['id'] # The current Flask session user ID
-
-    # Firestore path for patient data: /artifacts/{appId}/users/{userId}/patients
-    patients_collection_path = ['artifacts', app_id, 'users', user_id, 'patients']
-
-    # Simulate checking if OP Number exists for this user in Firestore
-    existing_patients = get_firestore_documents_in_collection(patients_collection_path, query_filters={'op_number': op_number, 'user_id': user_id})
-    if existing_patients:
-        flash('OP Number already exists for another patient under your account. Please use a unique OP Number or select from recent entries.', 'error')
-        return redirect(url_for('dashboard'))
-
-    try:
-        patient_data = {
-            'user_id': user_id,
-            'op_number': op_number,
-            'patient_name': patient_name,
-            'age': int(age),
-            'sex': sex,
-            'record_date': record_date,
-            'created_at': datetime.now().isoformat() # ISO format for easy sorting
-        }
-
-        # Add patient data to Firestore
-        add_firestore_document(patients_collection_path, patient_data)
-
-        flash('Patient record saved successfully (to Firestore)! Now upload an image.', 'success')
-        return redirect(url_for('upload_page', op_number=op_number))
-    except Exception as e:
-        flash(f'Error saving patient record to Firestore: {e}', 'error')
-        return redirect(url_for('dashboard'))
+    return render_template('dashboard.html', user=g.user)
 
 
 @app.route('/upload_page/<op_number>')
 @login_required
 def upload_page(op_number):
-    """Renders the dedicated image upload page for a specific patient."""
-    user_id = g.user['id']
-
-    # Fetch patient from Firestore
-    patients_collection_path = ['artifacts', app_id, 'users', user_id, 'patients']
-    patient = None
-    all_patients = get_firestore_documents_in_collection(patients_collection_path, query_filters={'op_number': op_number, 'user_id': user_id})
-    if all_patients:
-        patient = all_patients[0] # Assuming op_number is unique per user
-
-    if patient is None:
-        flash('Patient not found or unauthorized access.', 'error')
-        return redirect(url_for('dashboard'))
-
-    return render_template('upload_page.html', op_number=op_number, patient_name=patient['patient_name'])
+    # This route is intended to prepare the context for upload, e.g., for a specific patient/operation number
+    return render_template('upload_file.html', op_number=op_number)
 
 
-@app.route('/upload', methods=['GET', 'POST'])
+@app.route('/upload_file', methods=['POST'])
 @login_required
-def upload_file(): # Renamed from 'upload' to 'upload_file' for clarity and consistency
-    """Handles image upload, shade detection, and PDF report generation."""
+def upload_file():
     if request.method == 'POST':
-        # Check if the post request has the file part
-        if 'file' not in request.files:
-            flash('No file part', 'danger')
-            return redirect(request.url)
-        file = request.files['file']
-        patient_name = request.form.get('patient_name', 'Unnamed Patient') # Get patient_name from form
+        patient_name = request.form.get('patient_name')
+        op_number = request.form.get('op_number', 'N/A') # Get op_number from form if available
 
-        # If the user does not select a file, the browser submits an
-        # empty file without a filename.
+        if not patient_name:
+            flash('Patient Name is required.', 'danger')
+            return redirect(request.url)
+
+        if 'file' not in request.files:
+            flash('No file part in the request.', 'danger')
+            return redirect(request.url)
+
+        file = request.files['file']
         if file.filename == '':
-            flash('No selected file', 'danger')
+            flash('No selected file.', 'danger')
             return redirect(request.url)
 
         if file:
-            filename = secure_filename(file.filename)
-            # Generate a unique filename using UUID and original extension
-            file_ext = os.path.splitext(filename)[1] # Get file extension (e.g., .jpg)
-            unique_filename = str(uuid.uuid4()) + file_ext # Combine UUID with extension
-            
-            original_image_path = os.path.join(UPLOAD_FOLDER, unique_filename) # Use unique_filename here
-            file.save(original_image_path)
-            flash('Image uploaded successfully!', 'success')
+            unique_filename = str(uuid.uuid4()) + "_" + secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+            file.save(filepath)
+            print(f"DEBUG: File saved to {filepath}")
 
-            # Perform shade detection
-            detected_shades = detect_shades_from_image(original_image_path)
-
-            if detected_shades["overall_ml_shade"] == "Error":
-                flash("Error processing image for shade detection.", 'danger')
-                return redirect(url_for('upload_page', op_number=request.form.get('op_number'))) # Redirect back to upload page
-
-            # Generate PDF report
-            report_filename = f"report_{patient_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-            report_filepath = os.path.join(REPORT_FOLDER, report_filename)
-            generate_pdf_report(patient_name, detected_shades, original_image_path, report_filepath)
-            flash('PDF report generated!', 'success')
-
-            # Prepare analysis date for the HTML template
+            # Perform shade detection and AI analysis
+            detected_shades = detect_shades_from_image(filepath)
             formatted_analysis_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # Save report metadata to simulated Firestore
-            report_data = {
-                'patient_name': patient_name,
-                'op_number': request.form.get('op_number'), # Ensure OP number is saved with report
-                'original_image': unique_filename, # Store the unique filename in DB
-                'report_filename': report_filename,
-                'detected_shades': detected_shades, # Store all detected shades
-                'timestamp': datetime.now().isoformat(),
-                'user_id': g.firestore_user_id # Link to the current user
-            }
-            reports_collection_path = ['artifacts', app_id, 'users', g.firestore_user_id, 'reports']
-            add_firestore_document(reports_collection_path, report_data)
+            report_filename = f"report_{patient_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+            pdf_path = generate_pdf_report(patient_name, detected_shades, unique_filename, report_filename, formatted_analysis_date)
+            print(f"DEBUG: PDF report generated at {pdf_path}")
 
-            # Pass data to the report display template
-            return render_template('report.html',
+            # --- NEW: Save Patient Record to PostgreSQL ---
+            if g.user_id: # Ensure a user is logged in
+                try:
+                    new_record = PatientRecord(
+                        user_id=g.user_id,
+                        patient_name=patient_name,
+                        record_date=datetime.utcnow(), # Use UTC for consistency
+                        uploaded_image_path=unique_filename,
+                        analysis_results_json=json.dumps(detected_shades), # Store full analysis as JSON
+                        # Saving individual shades for easier querying/display if needed
+                        incisal_shade=detected_shades.get('incisal', 'N/A'),
+                        middle_shade=detected_shades.get('middle', 'N/A'),
+                        cervical_shade=detected_shades.get('cervical', 'N/A'),
+                        overall_ml_shade=detected_shades.get('overall_ml_shade', 'N/A')
+                        # Add other fields here if you extend PatientRecord model above
+                    )
+                    db.session.add(new_record)
+                    db.session.commit()
+                    flash('Image processed and patient record saved successfully!', 'success')
+                except Exception as e:
+                    db.session.rollback() # Rollback in case of database error
+                    flash(f'Error saving patient record to database: {e}', 'danger')
+                    print(f"ERROR: Failed to save patient record: {e}")
+                    traceback.print_exc()
+            else:
+                flash('User not logged in, patient record could not be saved to database.', 'warning')
+
+            return render_template('results.html',
                                    patient_name=patient_name,
                                    shades=detected_shades,
                                    image_filename=unique_filename, # Pass unique filename to template
                                    report_filename=report_filename,
                                    analysis_date=formatted_analysis_date) # Pass formatted date
 
-    # Handle GET request for upload_file route (if a user directly navigates to /upload)
-    # This route is usually accessed via /upload_page/<op_number> which has proper context.
-    # We can default to redirecting to dashboard or providing a basic form if accessed directly.
-    flash("Please select a patient from the dashboard to upload an image.", 'info')
-    return redirect(url_for('dashboard')) # Redirect if accessed directly without patient context
+    # Handle GET request for upload_file route (if a user directly navigates to /upload_file)
+    return render_template('upload_file.html', op_number='N/A')
 
 
-@app.route('/download_report/<filename>')
-@login_required
+@app.route('/reports/<filename>')
+@login_required # Protect report access
 def download_report(filename):
-    """Allows downloading of generated PDF reports."""
-    # In a real app, you'd ensure this report belongs to the current user's accessible reports.
-    # For this simulation, we'll allow download if the file exists.
-    return send_from_directory(REPORT_FOLDER, filename, as_attachment=True)
+    return send_from_directory(app.config['REPORT_FOLDER'], filename, as_attachment=True)
 
-# Main entry point
+
+@app.route('/uploads/<filename>')
+@login_required # Protect uploaded image access
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+
+@app.route('/patient_history')
+@login_required
+def patient_history():
+    if g.user_id:
+        try:
+            # Retrieve records for the logged-in user from PostgreSQL, ordered by date
+            user_records = PatientRecord.query.filter_by(user_id=g.user_id).order_by(PatientRecord.record_date.desc()).all()
+
+            # Parse JSON analysis results for display in the template
+            for record in user_records:
+                if record.analysis_results_json:
+                    record.parsed_analysis = json.loads(record.analysis_results_json)
+                else:
+                    record.parsed_analysis = {}
+            return render_template('patient_history.html', records=user_records)
+        except Exception as e:
+            flash(f'Error retrieving patient history: {e}', 'danger')
+            print(f"ERROR: Failed to retrieve patient history: {e}")
+            traceback.print_exc()
+            return render_template('patient_history.html', records=[]) # Render with empty list on error
+    else:
+        flash('Please log in to view your history.', 'warning')
+        return redirect(url_for('login'))
+
+
 if __name__ == '__main__':
-    # Ensure model is loaded/trained on startup
-    if shade_classifier_model is None:
-        print("CRITICAL: Machine Learning model could not be loaded or trained. Shade prediction will not work.")
-    app.run(debug=True)
+    # This block is typically for local development only.
+    # On Render, Gunicorn will manage running your app.
+    # You generally don't need db.create_all() here if using Flask-Migrate in Render's build command.
+    # with app.app_context():
+    #     db.create_all() # Only for initial creation if NOT using Flask-Migrate
+    app.run(debug=True) # Run in debug mode for local development
